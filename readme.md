@@ -45,4 +45,4 @@ captured_faces/
    - 適合偵測遠距離微小人臉，但運算負擔較重。
 
 ## 🔗 相關資源
-- **模型權重 / 測試素材**：[Google Drive 下載連結](https://drive.google.com/file/d/1rxf9VH-5fO69LS0IjhIjQqWv7UTS7bxb/view?usp=sharing)
+- **模型權重 / 測試素材(放進~/.insightface/models或是使用buffalo_m)**：[Google Drive 下載連結](https://drive.google.com/file/d/1rxf9VH-5fO69LS0IjhIjQqWv7UTS7bxb/view?usp=sharing)
