@@ -1,0 +1,6 @@
+opencv-python
+numpy==2.2.6
+insightface==0.7.3
+ultralytics==8.3.246
+onnxruntime-gpu==1.23.2
+scikit-learn==1.7.2
