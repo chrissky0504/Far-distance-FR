@@ -62,9 +62,9 @@ class VideoCaptureThreading:
 # 設定區域
 # ==========================================
 KNOWN_FACES_DIR = 'captured_faces'
-TARGET_IMAGE_PATH = 'test4.mp4'  # 可更改為影片或圖片路徑
-MODEL_NAME = 'buffalo_m'
-THRESHOLD = 0.3                     
+TARGET_IMAGE_PATH = 'muti1.mp4'  # 可更改為影片或圖片路徑
+MODEL_NAME = 'buffalo_m'  # InsightFace 模型名稱
+THRESHOLD = 0.35                     
 
 # ==========================================
 # 初始化
