@@ -17,3 +17,4 @@ __pycache__/
 *.zip
 .vscode/
 *.svo2
+trt_cache

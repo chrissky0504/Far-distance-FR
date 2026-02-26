@@ -63,15 +63,15 @@ class VideoCaptureThreading:
 # ==========================================
 KNOWN_FACES_DIR = 'captured_faces'
 TARGET_IMAGE_PATH = 'muti1.mp4'  # 可更改為影片或圖片路徑
-MODEL_NAME = 'buffalo_m'  # InsightFace 模型名稱
+MODEL_NAME = 'my_arcface_pack_40'  # InsightFace 模型名稱
 THRESHOLD = 0.35                     
 
 # ==========================================
 # 初始化
 # ==========================================
-def init_insightface():
-    print(f"🚀 初始化 InsightFace ({MODEL_NAME})...")
-    app = FaceAnalysis(name=MODEL_NAME, providers=['CUDAExecutionProvider'])
+def init_insightface(model_name=MODEL_NAME):
+    print(f"🚀 初始化 InsightFace ({model_name})...")
+    app = FaceAnalysis(name=model_name, providers=['CUDAExecutionProvider'])
     app.prepare(ctx_id=0, det_size=(640, 640))
     print(f"🚀 初始化 YOLO11-Nano...")
     yolo_model = YOLO('yolo11n.pt')
@@ -391,6 +391,58 @@ def compare_faces(app, yolo_model, target_path, known_embeddings, known_names, k
         cv2.destroyAllWindows()
 
 # ==========================================
+# 準確率測試功能 (Video Full Frame Mode)
+# ==========================================
+def evaluate_video_accuracy(models_list, video_path):
+    print(f"\n📊 開始多模型影片準確率比對 (Full Frame 模式): {video_path}")
+    if not os.path.exists(video_path):
+        print(f"❌ 找不到影片檔案: {video_path}")
+        return
+
+    all_stats = {}
+    for model_name in models_list:
+        print(f"\n⚙️ 正在測試模型: {model_name}")
+        # 1. 初始化模型
+        app, _ = init_insightface(model_name)
+        # 2. 根據該模型重新載入資料庫特徵
+        known_embeddings, known_names, _ = load_known_faces(app)
+        
+        cap = cv2.VideoCapture(video_path)
+        stats = {"total_faces": 0, "identities": {}, "frame_count": 0}
+        
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret: break
+            
+            # 使用 Native 模式 (全幀偵測)
+            faces = app.get(frame)
+            stats["total_faces"] += len(faces)
+            stats["frame_count"] += 1
+            
+            for face in faces:
+                name, score = match_face(face.embedding, known_embeddings, known_names)
+                stats["identities"][name] = stats["identities"].get(name, 0) + 1
+            
+            if stats["frame_count"] % 50 == 0:
+                print(f"  已處理 {stats['frame_count']} 幀...", end="\r")
+        
+        cap.release()
+        all_stats[model_name] = stats
+        print(f"\n✅ 模型 {model_name} 測試完成。")
+
+    if not all_stats: return
+
+    first_model = list(all_stats.keys())[0]
+    print("\n📈 最終比對統計 (總幀數: {}):".format(all_stats[first_model]["frame_count"]))
+    for model_name, s in all_stats.items():
+        print(f"\n🔹 [{model_name}]")
+        print(f"  - 總計偵測到人臉次數: {s['total_faces']}")
+        sorted_ids = sorted(s["identities"].items(), key=lambda x: x[1], reverse=True)
+        print(f"  - 辨識分佈 (TOP 5):")
+        for name, count in sorted_ids[:5]:
+            print(f"    * {name}: {count} 次")
+
+# ==========================================
 # 核心優化：極速測試模式
 # ==========================================
 def benchmark_performance(app, yolo_model, target_path, known_embeddings, known_names):
@@ -446,14 +498,19 @@ if __name__ == "__main__":
         print("\n請選擇執行模式:")
         print("1. [Benchmark] 極速效能測試 (不顯示畫面)")
         print("2. [Visualize + Benchmark] 視覺化比對後進行效能測試")
+        print("3. [Accuracy Comparison] 多模型影片準確率比對 (Full Frame)")
         
-        choice = input("請輸入選項 (1 或 2): ").strip()
+        choice = input("請輸入選項 (1, 2 或 3): ").strip()
         
         if choice == '1':
             benchmark_performance(app, yolo_model, TARGET_IMAGE_PATH, known_embeddings, known_names)
         elif choice == '2':
             compare_faces(app, yolo_model, TARGET_IMAGE_PATH, known_embeddings, known_names, known_files)
             benchmark_performance(app, yolo_model, TARGET_IMAGE_PATH, known_embeddings, known_names)
+        elif choice == '3':
+            # 定義想要比較的模型列表
+            models_to_test = ['my_arcface_pack', 'buffalo_m', 'my_arcface_pack_40']
+            evaluate_video_accuracy(models_to_test, TARGET_IMAGE_PATH)
         else:
             print("❌ 無效選項，結束程式")
     else:
