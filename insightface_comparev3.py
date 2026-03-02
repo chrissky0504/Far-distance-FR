@@ -1,6 +1,13 @@
 import cv2
 import numpy as np
 import time
+import os
+import glob
+
+# Patch np.bool for compatibility with older libraries (like tensorrt)
+if not hasattr(np, 'bool'):
+    np.bool = np.bool_
+
 import threading
 import queue
 from ultralytics import YOLO
@@ -17,7 +24,6 @@ if not hasattr(np, 'sctypes'):
         'others': [bool, object, bytes, str, np.void]
     }
 
-import os
 import insightface
 from insightface.app import FaceAnalysis
 
@@ -63,7 +69,7 @@ class VideoCaptureThreading:
 # ==========================================
 KNOWN_FACES_DIR = 'captured_faces'
 TARGET_IMAGE_PATH = 'muti1.mp4'  # 可更改為影片或圖片路徑
-MODEL_NAME = 'my_arcface_pack_40'  # InsightFace 模型名稱
+MODEL_NAME = 'buffalo_m'  # InsightFace 模型名稱
 THRESHOLD = 0.35                     
 
 # ==========================================
@@ -92,8 +98,9 @@ def init_insightface(model_name=MODEL_NAME):
     # 這裡的 det_size 決定了偵測器的解析度
     app.prepare(ctx_id=0, det_size=(1280, 1280)) 
     
-    print(f"🚀 初始化 YOLO11-Nano...")
-    yolo_model = YOLO('yolo11n.pt')
+    print(f"🚀 初始化 YOLO11-Nano (TensorRT Engine)...")
+    # 只要確認這裡檔名正確即可，其他邏輯完全通用
+    yolo_model = YOLO('yolo11n.engine')
     
     return app, yolo_model
 
@@ -187,7 +194,7 @@ def get_center_distance(box1, box2):
 tracked_identities = [] 
 frame_counter = 0
 
-def process_yolo_pipeline(app, yolo_model, img, known_embeddings, known_names):
+def process_yolo_pipeline(app, yolo_model, img, known_embeddings, known_names, draw=True):
     global frame_counter, tracked_identities
     frame_counter += 1
     t0 = time.time()
@@ -312,23 +319,27 @@ def process_yolo_pipeline(app, yolo_model, img, known_embeddings, known_names):
         if identity['miss_count'] < 10: # 容忍 10 幀漏抓 (慣性存活)
             new_tracked_identities.append(identity)
             # 繪製結果 (包含慣性框)
-            if identity['name'] != "Unknown" or identity['score'] > 0:
-                draw_recognition(img, identity['box'], identity['name'], identity['score'], identity['color'])
-            else:
-                cv2.rectangle(img, (identity['box'][0], identity['box'][1]), (identity['box'][2], identity['box'][3]), identity['color'], 1)
+            if draw:
+                if identity['name'] != "Unknown" or identity['score'] > 0:
+                    draw_recognition(img, identity['box'], identity['name'], identity['score'], identity['color'])
+                else:
+                    cv2.rectangle(img, (identity['box'][0], identity['box'][1]), (identity['box'][2], identity['box'][3]), identity['color'], 1)
     
     tracked_identities = new_tracked_identities
 
     t1 = time.time()
     fps = 1.0 / (t1 - t0) if (t1 - t0) > 0 else 0
-    status = "Recog" if DO_RECOGNITION else "Track"
-    cv2.putText(img, f"YOLO+Crop: {fps:.1f} FPS ({status})", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+    
+    if draw:
+        status = "Recog" if DO_RECOGNITION else "Track"
+        cv2.putText(img, f"YOLO+Crop: {fps:.1f} FPS ({status})", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+    
     return img
 
 # ==========================================
 # Pipeline 2: Native InsightFace (修復偵測失敗問題)
 # ==========================================
-def process_native_pipeline(app, img, known_embeddings, known_names):
+def process_native_pipeline(app, img, known_embeddings, known_names, draw=True):
     # Native 模式不跳幀，為了顯示真實的慘烈速度
     # 也不縮放，為了顯示真實的偵測能力
     
@@ -365,12 +376,16 @@ def process_native_pipeline(app, img, known_embeddings, known_names):
         box = box / scale
         box = box.astype(int)
         
-        color = (0, 255, 0) if name != "Unknown" else (0, 0, 255)
-        draw_recognition(img, box, name, score, color)
+        if draw:
+            color = (0, 255, 0) if name != "Unknown" else (0, 0, 255)
+            draw_recognition(img, box, name, score, color)
 
     t1 = time.time()
     fps = 1.0 / (t1 - t0) if (t1 - t0) > 0 else 0
-    cv2.putText(img, f"Native Full: {fps:.1f} FPS", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+    
+    if draw:
+        cv2.putText(img, f"Native Full: {fps:.1f} FPS", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+    
     return img
 
 # ==========================================
@@ -412,10 +427,10 @@ def compare_faces(app, yolo_model, target_path, known_embeddings, known_names, k
             combined = None
 
             if mode in ['all', 'yolo']:
-                frame_yolo = process_yolo_pipeline(app, yolo_model, frame.copy(), known_embeddings, known_names)
+                frame_yolo = process_yolo_pipeline(app, yolo_model, frame.copy(), known_embeddings, known_names, draw=True)
             
             if mode in ['all', 'native']:
-                frame_native = process_native_pipeline(app, frame.copy(), known_embeddings, known_names)
+                frame_native = process_native_pipeline(app, frame.copy(), known_embeddings, known_names, draw=True)
             
             if mode == 'all':
                 combined = np.hstack((frame_yolo, frame_native))
@@ -458,11 +473,11 @@ def compare_faces(app, yolo_model, target_path, known_embeddings, known_names, k
         combined = None
         
         if mode in ['all', 'yolo']:
-            img_yolo = process_yolo_pipeline(app, yolo_model, img.copy(), known_embeddings, known_names)
+            img_yolo = process_yolo_pipeline(app, yolo_model, img.copy(), known_embeddings, known_names, draw=True)
             combined = img_yolo
             
         if mode in ['all', 'native']:
-            img_native = process_native_pipeline(app, img.copy(), known_embeddings, known_names)
+            img_native = process_native_pipeline(app, img.copy(), known_embeddings, known_names, draw=True)
             combined = img_native
 
         if mode == 'all':
@@ -584,6 +599,14 @@ def evaluate_video_accuracy(models_list, video_path):
             for face in faces:
                 name, score = match_face(face.embedding, known_embeddings, known_names)
                 stats["identities"][name] = stats["identities"].get(name, 0) + 1
+                
+                # [新增] 模擬實際應用中的繪圖開銷，讓 FPS 測試更公平
+                # 將 bbox 映射回原圖座標
+                box = face.bbox.astype(float)
+                box = box / scale
+                box = box.astype(int)
+                color = (0, 255, 0) if name != "Unknown" else (0, 0, 255)
+                draw_recognition(frame, box, name, score, color)
             
             if stats["frame_count"] % 50 == 0:
                 elapsed = time.time() - start_time
@@ -611,6 +634,66 @@ def evaluate_video_accuracy(models_list, video_path):
             print(f"    * {name}: {count} 次")
 
 # ==========================================
+# 多模型效能 PK 功能
+# ==========================================
+def benchmark_multi_model(models_list, video_path, mode='native'):
+    print(f"\n🏆 開始多模型效能 PK ({mode} Mode): {video_path}")
+    if not os.path.exists(video_path): return
+
+    results = {}
+    
+    # 確保 Reset 追蹤變數
+    global frame_counter, tracked_identities
+
+    for model_name in models_list:
+        print(f"\n⚙️ 正在測試模型: {model_name}")
+        
+        # Reset variables for each model
+        frame_counter = 0
+        tracked_identities = []
+        
+        # 初始化該模型
+        app, yolo_model = init_insightface(model_name)
+        known_embeddings, known_names, _ = load_known_faces(app)
+        
+        cap = VideoCaptureThreading(video_path)
+        count = 0
+        start = time.time()
+        
+        try:
+            while True:
+                frame = cap.read()
+                if frame is None:
+                    if not cap.running: break
+                    time.sleep(0.001)
+                    continue
+                
+                # 測試時關閉繪圖 (draw=False) 以取得純運算 FPS
+                if mode == 'yolo':
+                    process_yolo_pipeline(app, yolo_model, frame, known_embeddings, known_names, draw=False)
+                else:
+                    process_native_pipeline(app, frame, known_embeddings, known_names, draw=False)
+
+                count += 1
+                if count % 50 == 0:
+                    elapsed = time.time() - start
+                    print(f"\r  Running... {count} frames ({count/elapsed:.1f} FPS)", end="")
+        except KeyboardInterrupt:
+            pass
+            
+        total_time = time.time() - start
+        avg_fps = count / total_time if total_time > 0 else 0
+        cap.release()
+        
+        results[model_name] = avg_fps
+        print(f"\n✅ 模型 {model_name} --> {avg_fps:.2f} FPS")
+
+    print(f"\n🏁 最終排行榜 ({mode}):")
+    sorted_res = sorted(results.items(), key=lambda x: x[1], reverse=True)
+    for i, (m, fps) in enumerate(sorted_res):
+        print(f"  {i+1}. {m}: {fps:.2f} FPS")
+
+# ==========================================
 # 核心優化：極速測試模式
 # ==========================================
 def benchmark_performance(app, yolo_model, target_path, known_embeddings, known_names, run_mode='all'):
@@ -635,9 +718,9 @@ def benchmark_performance(app, yolo_model, target_path, known_embeddings, known_
                     continue
                 
                 if mode_name == "YOLO+Crop":
-                    process_func(app, yolo_model, frame, known_embeddings, known_names)
+                    process_func(app, yolo_model, frame, known_embeddings, known_names, draw=False)
                 else:
-                    process_func(app, frame, known_embeddings, known_names)
+                    process_func(app, frame, known_embeddings, known_names, draw=False)
 
                 count += 1
                 if count % 30 == 0:
@@ -678,9 +761,13 @@ if __name__ == "__main__":
         print("4. [YOLO Visualize + Benchmark] YOLO+Crop 視覺化並測試效能")
         print("5. [Native Visualize + Benchmark] Native Full Frame 視覺化並測試效能")
         print("6. [Model VS Visual] 雙模型即時視覺化對決 (Native Mode)")
+        print("7. [Multi-Model Benchmark] 多模型 YOLO+Crop 效能 PK")
+        print("8. [Multi-Model Benchmark] 多模型 Native Full 效能 PK")
         
-        choice = input("請輸入選項 (1-6): ").strip()
+        choice = input("請輸入選項 (1-8): ").strip()
         
+        models_pk_list = ['my_arcface_pack', 'buffalo_m', 'my_arcface_pack_40']
+
         if choice == '1':
             benchmark_performance(app, yolo_model, TARGET_IMAGE_PATH, known_embeddings, known_names, run_mode='all')
         elif choice == '2':
@@ -688,7 +775,7 @@ if __name__ == "__main__":
             benchmark_performance(app, yolo_model, TARGET_IMAGE_PATH, known_embeddings, known_names, run_mode='all')
         elif choice == '3':
             # 定義想要比較的模型列表
-            models_to_test = ['my_arcface_pack', 'buffalo_m', 'my_arcface_pack_40']
+            models_to_test = models_pk_list
             evaluate_video_accuracy(models_to_test, TARGET_IMAGE_PATH)
         elif choice == '4':
             compare_faces(app, yolo_model, TARGET_IMAGE_PATH, known_embeddings, known_names, known_files, mode='yolo')
@@ -701,6 +788,10 @@ if __name__ == "__main__":
             default_model = MODEL_NAME
             model_b = input(f"請輸入要比較的模型名稱 (預設: {default_model}): ").strip() or default_model
             visual_compare_models(model_a, model_b, TARGET_IMAGE_PATH)
+        elif choice == '7':
+            benchmark_multi_model(models_pk_list, TARGET_IMAGE_PATH, mode='yolo')
+        elif choice == '8':
+            benchmark_multi_model(models_pk_list, TARGET_IMAGE_PATH, mode='native')
         else:
             print("❌ 無效選項，結束程式")
     else:
