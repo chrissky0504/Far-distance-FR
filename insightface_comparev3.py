@@ -75,7 +75,7 @@ THRESHOLD = 0.35
 # ==========================================
 # 初始化
 # ==========================================
-def init_insightface(model_name=MODEL_NAME):
+def init_insightface(model_name=MODEL_NAME, load_yolo=True):
     print(f"🚀 初始化 InsightFace ({model_name})...")
     
     # 💡 設定 TensorRT 參數，強制開啟 FP16 與引擎快取
@@ -98,9 +98,11 @@ def init_insightface(model_name=MODEL_NAME):
     # 這裡的 det_size 決定了偵測器的解析度
     app.prepare(ctx_id=0, det_size=(1280, 1280)) 
     
-    print(f"🚀 初始化 YOLO11-Nano (TensorRT Engine)...")
-    # 只要確認這裡檔名正確即可，其他邏輯完全通用
-    yolo_model = YOLO('yolo11n.engine')
+    yolo_model = None
+    if load_yolo:
+        print(f"🚀 初始化 YOLO11-Nano (TensorRT Engine)...")
+        # 只要確認這裡檔名正確即可，其他邏輯完全通用
+        yolo_model = YOLO('yolo11n.engine')
     
     return app, yolo_model
 
@@ -567,8 +569,8 @@ def evaluate_video_accuracy(models_list, video_path):
     all_stats = {}
     for model_name in models_list:
         print(f"\n⚙️ 正在測試模型: {model_name}")
-        # 1. 初始化模型
-        app, _ = init_insightface(model_name)
+        # 1. 初始化模型 (功能3不需要YOLO，跳過載入以節省時間)
+        app, _ = init_insightface(model_name, load_yolo=False)
         # 2. 根據該模型重新載入資料庫特徵
         known_embeddings, known_names, _ = load_known_faces(app)
         
@@ -653,7 +655,9 @@ def benchmark_multi_model(models_list, video_path, mode='native'):
         tracked_identities = []
         
         # 初始化該模型
-        app, yolo_model = init_insightface(model_name)
+        # 若是 native 模式，不需要 YOLO
+        load_yolo = (mode == 'yolo')
+        app, yolo_model = init_insightface(model_name, load_yolo=load_yolo)
         known_embeddings, known_names, _ = load_known_faces(app)
         
         cap = VideoCaptureThreading(video_path)
@@ -766,7 +770,7 @@ if __name__ == "__main__":
         
         choice = input("請輸入選項 (1-8): ").strip()
         
-        models_pk_list = ['my_arcface_pack', 'buffalo_m', 'my_arcface_pack_40']
+        models_pk_list = ['my_arcface_pack', 'buffalo_m', 'my_arcface_pack_40', 'r50MS1MV3']
 
         if choice == '1':
             benchmark_performance(app, yolo_model, TARGET_IMAGE_PATH, known_embeddings, known_names, run_mode='all')
@@ -784,7 +788,7 @@ if __name__ == "__main__":
             compare_faces(app, yolo_model, TARGET_IMAGE_PATH, known_embeddings, known_names, known_files, mode='native')
             benchmark_performance(app, yolo_model, TARGET_IMAGE_PATH, known_embeddings, known_names, run_mode='native')
         elif choice == '6':
-            model_a = 'buffalo_m'
+            model_a = 'r50MS1MV3'  # 基準模型
             default_model = MODEL_NAME
             model_b = input(f"請輸入要比較的模型名稱 (預設: {default_model}): ").strip() or default_model
             visual_compare_models(model_a, model_b, TARGET_IMAGE_PATH)
