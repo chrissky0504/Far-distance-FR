@@ -11,6 +11,7 @@
 - **慣性追蹤**：在 YOLO 模式下提供簡單的中心點追蹤與漏抓補償。
 
 ## 🛠️ 安裝需求
+Python=3.10
 請確保環境中已安裝 CUDA 驅動與相關套件：
 ```bash
 pip install opencv-python numpy ultralytics insightface onnxruntime-gpu
