@@ -30,6 +30,20 @@ from insightface.app import FaceAnalysis
 # ==========================================
 # 優化工具: 多執行緒影片讀取 (解決讀取瓶頸)
 # ==========================================
+gui_warning_printed = False
+
+def safe_imshow(title, img):
+    global gui_warning_printed
+    try:
+        cv2.imshow(title, img)
+        return True
+    except cv2.error as e:
+        if "The function is not implemented" in str(e) or "xcb_window" in str(e):
+            if not gui_warning_printed:
+                print("\n⚠️ [警告] 目前環境不支援 OpenCV GUI 顯示 (如 Headless/WSL)。將略過視窗顯示，改為純背景處理並儲存檔案。")
+                gui_warning_printed = True
+        return False
+
 class VideoCaptureThreading:
     def __init__(self, src=0):
         self.cap = cv2.VideoCapture(src)
@@ -68,7 +82,7 @@ class VideoCaptureThreading:
 # 設定區域
 # ==========================================
 KNOWN_FACES_DIR = 'captured_faces'
-TARGET_IMAGE_PATH = 'muti1.mp4'  # 可更改為影片或圖片路徑
+TARGET_IMAGE_PATH = 'multi1.mp4'  # 可更改為影片或圖片路徑
 MODEL_NAME = 'buffalo_m'  # InsightFace 模型名稱
 THRESHOLD = 0.35                     
 
@@ -166,6 +180,28 @@ def load_known_faces(app):
 # ==========================================
 # 輔助函式
 # ==========================================
+def apply_clahe(img):
+    """
+    對影像應用 CLAHE (Contrast Limited Adaptive Histogram Equalization)
+    增強局部對比度，特別適用於人臉光源不均勻的情況。
+    """
+    if len(img.shape) == 3:
+        # 將 BGR 轉換為 LAB 色彩空間
+        lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        
+        # 建立 CLAHE 物件並應用於 L 通道
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        cl = clahe.apply(l)
+        
+        # 合併通道並轉換回 BGR
+        limg = cv2.merge((cl, a, b))
+        return cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
+    else:
+        # 單通道灰階圖
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        return clahe.apply(img)
+
 def crop_and_pad_center(img, target_w=1280, target_h=1280):
     """
     將影像裁切並填充至目標大小 (預設 1280x1280)。
@@ -319,6 +355,9 @@ def process_yolo_pipeline(app, yolo_model, img, known_embeddings, known_names, d
                 
                 nw, nh = int(w_crop * scale), int(h_crop * scale)
                 person_crop_resized = cv2.resize(person_crop, (nw, nh))
+                
+                # 💡 在此處加入 CLAHE 影像增強
+                person_crop_resized = apply_clahe(person_crop_resized)
                 
                 canvas[:nh, :nw, :] = person_crop_resized
                 
@@ -484,18 +523,20 @@ def compare_faces(app, yolo_model, target_path, known_embeddings, known_names, k
             elif mode == 'yolo': title = "YOLO+Crop Pipeline"
             elif mode == 'native': title = "Native Full Pipeline"
 
-            cv2.imshow(title, display_frame)
+            shown = safe_imshow(title, display_frame)
             
-            # [修正] 智慧等待，控制播放速度
-            processing_time = (time.time() - frame_start) * 1000 # ms
-            wait_ms = max(1, frame_delay - int(processing_time))
-            
-            if cv2.waitKey(wait_ms) & 0xFF == ord('q'):
-                break
+            # [修正] 智慧等待，控制播放速度 (僅在 GUI 成功啟動時才等待)
+            if shown:
+                processing_time = (time.time() - frame_start) * 1000 # ms
+                wait_ms = max(1, frame_delay - int(processing_time))
+                if cv2.waitKey(wait_ms) & 0xFF == ord('q'):
+                    break
         
         cap.release()
         out.release()
-        cv2.destroyAllWindows()
+        try:
+            cv2.destroyAllWindows()
+        except: pass
         print(f"\n💾 完成，結果儲存至: {output_filename}")
 
     else:
@@ -523,9 +564,15 @@ def compare_faces(app, yolo_model, target_path, known_embeddings, known_names, k
         
         h, w = combined.shape[:2]
         display_scale = 0.5 if w > 1000 else 1.0
-        cv2.imshow("Result", cv2.resize(combined, (0,0), fx=display_scale, fy=display_scale))
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
+        
+        shown = safe_imshow("Result", cv2.resize(combined, (0,0), fx=display_scale, fy=display_scale))
+        if shown:
+            cv2.waitKey(0)
+            try:
+                cv2.destroyAllWindows()
+            except: pass
+        else:
+            print(f"\n💾 圖片處理完成，結果儲存至: {output_filename}")
 
 # ==========================================
 # 視覺化模型比較功能 (Native Mode)
@@ -579,16 +626,19 @@ def visual_compare_models(base_model_name, new_model_name, target_path):
         display_scale = 0.5 if w_disp > 1000 else 1.0
         display_frame = cv2.resize(combined, (0, 0), fx=display_scale, fy=display_scale)
         
-        cv2.imshow(f"VS: {base_model_name} | {new_model_name}", display_frame)
+        shown = safe_imshow(f"VS: {base_model_name} | {new_model_name}", display_frame)
         
-        processing_time = (time.time() - frame_start) * 1000
-        wait_ms = max(1, frame_delay - int(processing_time))
-        if cv2.waitKey(wait_ms) & 0xFF == ord('q'):
-            break
+        if shown:
+            processing_time = (time.time() - frame_start) * 1000
+            wait_ms = max(1, frame_delay - int(processing_time))
+            if cv2.waitKey(wait_ms) & 0xFF == ord('q'):
+                break
             
     cap.release()
     out.release()
-    cv2.destroyAllWindows()
+    try:
+        cv2.destroyAllWindows()
+    except: pass
     print(f"\n💾 完成，結果儲存至: {output_filename}")
 
 # ==========================================
@@ -828,7 +878,7 @@ if __name__ == "__main__":
             compare_faces(app, yolo_model, TARGET_IMAGE_PATH, known_embeddings, known_names, known_files, mode='native')
             benchmark_performance(app, yolo_model, TARGET_IMAGE_PATH, known_embeddings, known_names, run_mode='native')
         elif choice == '6':
-            model_a = 'r50MS1MV3'  # 基準模型
+            model_a = 'buffalo_m'  # 基準模型
             default_model = MODEL_NAME
             model_b = input(f"請輸入要比較的模型名稱 (預設: {default_model}): ").strip() or default_model
             visual_compare_models(model_a, model_b, TARGET_IMAGE_PATH)

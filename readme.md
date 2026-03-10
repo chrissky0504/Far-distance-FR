@@ -14,7 +14,7 @@
 Python=3.10
 請確保環境中已安裝 CUDA 驅動與相關套件：
 ```bash
-pip install opencv-python numpy ultralytics insightface onnxruntime-gpu
+pip install opencv-python numpy ultralytics insightface onnxruntime-gpu tensorrt-cu12
 ```
 
 ## 📂 資料庫準備
