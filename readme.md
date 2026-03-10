@@ -4,6 +4,8 @@
 
 ## 🚀 功能特點
 - **雙 Pipeline 比對**：同時執行 YOLO 輔助辨識與原生 InsightFace 辨識。
+- **TensorRT 加速**：整合 TensorRT FP16 與 Engine Cache 優化，固定輸入尺寸以獲得極致推論速度。
+- **多模型評測**：內建多模型比較功能 (Benchmark/Visual)，可針對不同 Backbone 進行準確度與速度比對。
 - **多執行緒讀取**：使用 `VideoCaptureThreading` 解決影片讀取瓶頸，提升 GPU 利用率。
 - **極速測試模式**：提供 Benchmark 模式，排除顯示與寫入損耗，測試硬體極限 FPS。
 - **慣性追蹤**：在 YOLO 模式下提供簡單的中心點追蹤與漏抓補償。
@@ -26,14 +28,20 @@ captured_faces/
 ```
 
 ## 🖥️ 使用方法
-1. 修改 `insightface_compare.py` 中的 `TARGET_IMAGE_PATH` 指向您的測試影片或圖片。
+1. 修改 `insightface_comparev3.py` 中的 `TARGET_IMAGE_PATH` 指向您的測試影片或圖片。
 2. 執行程式：
    ```bash
-   python insightface_compare.py
+   python insightface_comparev3.py
    ```
 3. 根據提示選擇模式：
-   - `1`: 執行極速效能測試 (Benchmark)。
-   - `2`: 先進行視覺化比對，結束後再執行效能測試。
+   - `1`: **All Benchmark** - 極速效能測試 (YOLO + Native)
+   - `2`: **Visualize + Benchmark** - 視覺化比對與效能測試 (Dual View)
+   - `3`: **Accuracy Comparison** - 多模型影片準確率比對 (Full Frame)
+   - `4`: **YOLO Visualize** - 單獨測試 YOLO+Crop Pipeline
+   - `5`: **Native Visualize** - 單獨測試 Native Full Frame Pipeline
+   - `6`: **Model VS Visual** - 雙模型即時視覺化對決 (A/B Test)
+   - `7`: **Multi-Model Benchmark** - 多模型 YOLO 模式效能 PK
+   - `8`: **Multi-Model Benchmark** - 多模型 Native 模式效能 PK
 
 ## 📊 Pipeline 說明
 1. **YOLO+Crop (左側)**：
@@ -42,6 +50,7 @@ captured_faces/
    - 每 5 幀執行一次辨識，其餘幀使用慣性追蹤。
 2. **Native Full (右側)**：
    - 直接將原始影像交由 InsightFace 進行全圖偵測與辨識。
+   - 強制縮放至 1280x1280 以符合 TensorRT 引擎輸入要求。
    - 適合偵測遠距離微小人臉，但運算負擔較重。
 
 ## 🔗 相關資源
