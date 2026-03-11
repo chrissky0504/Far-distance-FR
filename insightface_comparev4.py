@@ -82,7 +82,7 @@ class VideoCaptureThreading:
 # 設定區域
 # ==========================================
 KNOWN_FACES_DIR = 'captured_faces'
-TARGET_IMAGE_PATH = 'multi1.mp4'  # 可更改為影片或圖片路徑
+TARGET_IMAGE_PATH = 'muti1.mp4'  # 可更改為影片或圖片路徑
 MODEL_NAME = 'buffalo_m'  # InsightFace 模型名稱
 THRESHOLD = 0.35                     
 
@@ -162,15 +162,41 @@ def load_known_faces(app):
             canvas[:nh, :nw, :] = img_resized
 
             # 4. 使用標準畫布進行偵測，確保 TensorRT 穩定運作
-            faces = app.get(canvas)
+            from insightface.app.common import Face
+            from insightface.utils import face_align
             
-            if len(faces) > 0:
-                faces = sorted(faces, key=lambda x: (x.bbox[2]-x.bbox[0]) * (x.bbox[3]-x.bbox[1]), reverse=True)
-                embedding = faces[0].embedding
-                embedding = embedding / np.linalg.norm(embedding)
-                known_embeddings.append(embedding)
-                known_names.append(name)
-                known_files.append(filename)
+            bboxes, kpss = app.det_model.detect(canvas, max_num=0)
+            faces = []
+            if bboxes is not None:
+                rec_model = app.models.get('recognition')
+                for i in range(bboxes.shape[0]):
+                    bbox = bboxes[i, 0:4]
+                    det_score = bboxes[i, 4]
+                    kps = kpss[i] if kpss is not None else None
+                    face = Face(bbox=bbox, kps=kps, det_score=det_score)
+                    
+                    if rec_model is not None:
+                        # 切出對齊的人臉 (112x112)
+                        aimg = face_align.norm_crop(canvas, landmark=face.kps, image_size=rec_model.input_size[0])
+                        
+                        # 💡 核心修改：同時提取「原始版」與「CLAHE版」的特徵
+                        # 1. 原始特徵
+                        embedding_normal = rec_model.get_feat(aimg).flatten()
+                        embedding_normal = embedding_normal / np.linalg.norm(embedding_normal)
+                        
+                        # 2. CLAHE 特徵 (強制對註冊照片做 CLAHE，無論它原本亮不亮)
+                        aimg_clahe_forced = apply_clahe(aimg)
+                        embedding_clahe = rec_model.get_feat(aimg_clahe_forced).flatten()
+                        embedding_clahe = embedding_clahe / np.linalg.norm(embedding_clahe)
+                        
+                        # 把兩種特徵都存進資料庫，名字都叫同一個人
+                        known_embeddings.append(embedding_normal)
+                        known_names.append(name)
+                        known_files.append(filename + "_normal")
+                        
+                        known_embeddings.append(embedding_clahe)
+                        known_names.append(name)
+                        known_files.append(filename + "_clahe")
             else:
                 print(f"    ⚠️ 無法偵測到人臉: {filename}")
                 
@@ -180,6 +206,29 @@ def load_known_faces(app):
 # ==========================================
 # 輔助函式
 # ==========================================
+def smart_clahe(img):
+    """
+    智慧判斷是否需要進行 CLAHE 處理。
+    只在「整體太暗」或「對比度極端 (陰陽臉)」時才觸發。
+    """
+    # 1. 轉成單通道灰階來計算亮度
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    
+    # 2. 計算平均亮度 (0~255)
+    mean_brightness = np.mean(gray)
+    
+    # 3. 計算亮度標準差 (判斷是否為光影落差極大的陰陽臉)
+    std_brightness = np.std(gray)
+    
+    # 💡 判斷邏輯 (門檻數值可依你的戶外實際情況微調)
+    # 如果平均亮度小於 80 (太暗)，或者標準差大於 75 (光影極端不均)
+    if mean_brightness < 80 or std_brightness > 75:
+        # 進行急救
+        return apply_clahe(img)
+    else:
+        # 光線正常，直接放行原圖，保護 ArcFace 特徵
+        return img
+    
 def apply_clahe(img):
     """
     對影像應用 CLAHE (Contrast Limited Adaptive Histogram Equalization)
@@ -356,24 +405,31 @@ def process_yolo_pipeline(app, yolo_model, img, known_embeddings, known_names, d
                 nw, nh = int(w_crop * scale), int(h_crop * scale)
                 person_crop_resized = cv2.resize(person_crop, (nw, nh))
                 
-                # 💡 在此處加入 CLAHE 影像增強
-                person_crop_resized = apply_clahe(person_crop_resized)
-                
                 canvas[:nh, :nw, :] = person_crop_resized
                 
-                # 移除動態 input_size 設定
-                # app.det_model.input_size = ... 
+                from insightface.app.common import Face
+                from insightface.utils import face_align
                 
-                faces = app.get(canvas)
+                bboxes, kpss = app.det_model.detect(canvas, max_num=0)
+                faces = []
+                if bboxes is not None:
+                    rec_model = app.models.get('recognition')
+                    for i in range(bboxes.shape[0]):
+                        bbox = bboxes[i, 0:4]
+                        det_score = bboxes[i, 4]
+                        kps = kpss[i] if kpss is not None else None
+                        face = Face(bbox=bbox, kps=kps, det_score=det_score)
+                        
+                        if rec_model is not None:
+                            aimg = face_align.norm_crop(canvas, landmark=face.kps, image_size=rec_model.input_size[0])
+                            aimg_clahe = smart_clahe(aimg)
+                            face.embedding = rec_model.get_feat(aimg_clahe).flatten()
+                        
+                        faces.append(face)
                 
                 if len(faces) > 0:
                     face = sorted(faces, key=lambda x: (x.bbox[2]-x.bbox[0])*(x.bbox[3]-x.bbox[1]), reverse=True)[0]
                     
-                    # 註解掉 debug 圖片存檔以提升效能
-                    # from insightface.utils import face_align
-                    # norm_crop = face_align.norm_crop(person_crop_resized, face.kps) # 注意這裡用 resized
-                    # cv2.imwrite("debug_warped_face_yolo.jpg", norm_crop)
-
                     final_name, final_score = match_face(face.embedding, known_embeddings, known_names)
                     matched_identity['name'] = final_name
                     matched_identity['score'] = final_score
@@ -427,7 +483,29 @@ def process_native_pipeline(app, img, known_embeddings, known_names, draw=True):
     canvas[:nh, :nw, :] = img_resized
     
     # 此時不需要再設定 app.det_model.input_size，因為它已經是固定的
-    faces = app.get(canvas)
+    # 原本是 faces = app.get(canvas)，現改為先偵測、對齊，再做 CLAHE，最後才做辨識
+    from insightface.app.common import Face
+    from insightface.utils import face_align
+    
+    bboxes, kpss = app.det_model.detect(canvas, max_num=0)
+    faces = []
+    if bboxes is not None:
+        rec_model = app.models.get('recognition')
+        for i in range(bboxes.shape[0]):
+            bbox = bboxes[i, 0:4]
+            det_score = bboxes[i, 4]
+            kps = kpss[i] if kpss is not None else None
+            face = Face(bbox=bbox, kps=kps, det_score=det_score)
+            
+            if rec_model is not None:
+                # 對齊切出人臉
+                aimg = face_align.norm_crop(canvas, landmark=face.kps, image_size=rec_model.input_size[0])
+                # 只對人臉這塊做 CLAHE 來節省資源
+                aimg_clahe = smart_clahe(aimg)
+                # 送入 ArcFace 取特徵
+                face.embedding = rec_model.get_feat(aimg_clahe).flatten()
+            
+            faces.append(face)
     
     if len(faces) > 0:
         face = faces[0]
@@ -680,7 +758,27 @@ def evaluate_video_accuracy(models_list, video_path):
             img_resized = cv2.resize(frame, (nw, nh))
             canvas[:nh, :nw, :] = img_resized
             
-            faces = app.get(canvas)
+            # 使用我們手動切解的流程：SCRFD -> Face Crop -> CLAHE -> ArcFace
+            from insightface.app.common import Face
+            from insightface.utils import face_align
+            
+            bboxes, kpss = app.det_model.detect(canvas, max_num=0)
+            faces = []
+            if bboxes is not None:
+                rec_model = app.models.get('recognition')
+                for i in range(bboxes.shape[0]):
+                    bbox = bboxes[i, 0:4]
+                    det_score = bboxes[i, 4]
+                    kps = kpss[i] if kpss is not None else None
+                    face = Face(bbox=bbox, kps=kps, det_score=det_score)
+                    
+                    if rec_model is not None:
+                        aimg = face_align.norm_crop(canvas, landmark=face.kps, image_size=rec_model.input_size[0])
+                        aimg_clahe = smart_clahe(aimg)
+                        face.embedding = rec_model.get_feat(aimg_clahe).flatten()
+                    
+                    faces.append(face)
+            
             stats["total_faces"] += len(faces)
             stats["frame_count"] += 1
             

@@ -166,6 +166,34 @@ def load_known_faces(app):
 # ==========================================
 # 輔助函式
 # ==========================================
+def crop_and_pad_center(img, target_w=1280, target_h=1280):
+    """
+    將影像裁切並填充至目標大小 (預設 1280x1280)。
+    若尺寸大於目標則取中間裁切；若小於目標則用白邊補齊。
+    """
+    h, w = img.shape[:2]
+    
+    if w > target_w:
+        start_x = (w - target_w) // 2
+        img = img[:, start_x:start_x+target_w]
+    elif w < target_w:
+        pad_w = target_w - w
+        pad_left = pad_w // 2
+        pad_right = pad_w - pad_left
+        img = cv2.copyMakeBorder(img, 0, 0, pad_left, pad_right, cv2.BORDER_CONSTANT, value=(255, 255, 255))
+        
+    h = img.shape[0]
+    if h > target_h:
+        start_y = (h - target_h) // 2
+        img = img[start_y:start_y+target_h, :]
+    elif h < target_h:
+        pad_h = target_h - h
+        pad_top = pad_h // 2
+        pad_bottom = pad_h - pad_top
+        img = cv2.copyMakeBorder(img, pad_top, pad_bottom, 0, 0, cv2.BORDER_CONSTANT, value=(255, 255, 255))
+        
+    return img
+
 def draw_recognition(img, box, name, score, color):
     cv2.rectangle(img, (box[0], box[1]), (box[2], box[3]), color, 2)
     label = f"{name} ({score:.2f})"
@@ -412,17 +440,21 @@ def compare_faces(app, yolo_model, target_path, known_embeddings, known_names, k
         # 計算每幀應該停留的毫秒數 (用於控制播放速度)
         frame_delay = int(1000 / fps)
         
-        out_w = width * 2 if mode == 'all' else width
+        # 影像將被裁切與填充為 1280x1280
+        target_w, target_h = 1280, 1280
+        out_w = target_w * 2 if mode == 'all' else target_w
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         output_filename = os.path.join(output_dir, f"result_{mode}_{os.path.basename(target_path)}")
-        out = cv2.VideoWriter(output_filename, fourcc, fps, (out_w, height))
+        out = cv2.VideoWriter(output_filename, fourcc, fps, (out_w, target_h))
         
-        print(f"🎥 開始測試 ({width}x{height} @ {fps:.1f}fps)...")
+        print(f"🎥 開始測試 ({target_w}x{target_h} @ {fps:.1f}fps)...")
         
         while True:
             frame_start = time.time()
             ret, frame = cap.read()
             if not ret: break
+            
+            frame = crop_and_pad_center(frame)
             
             frame_yolo = None
             frame_native = None
@@ -472,6 +504,7 @@ def compare_faces(app, yolo_model, target_path, known_embeddings, known_names, k
         os.makedirs(output_dir, exist_ok=True)
         
         img = cv2.imread(target_path)
+        img = crop_and_pad_center(img)
         combined = None
         
         if mode in ['all', 'yolo']:
@@ -515,15 +548,14 @@ def visual_compare_models(base_model_name, new_model_name, target_path):
     os.makedirs(output_dir, exist_ok=True)
 
     cap = cv2.VideoCapture(target_path)
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = cap.get(cv2.CAP_PROP_FPS)
     frame_delay = int(1000 / fps)
 
     #設定輸出影片
+    target_w, target_h = 1280, 1280
     output_filename = os.path.join(output_dir, f"compare_{base_model_name}_vs_{new_model_name}_{os.path.basename(target_path)}")
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(output_filename, fourcc, fps, (width * 2, height))
+    out = cv2.VideoWriter(output_filename, fourcc, fps, (target_w * 2, target_h))
     
     print("🎥 按 'q' 退出...")
     
@@ -531,6 +563,8 @@ def visual_compare_models(base_model_name, new_model_name, target_path):
         frame_start = time.time()
         ret, frame = cap.read()
         if not ret: break
+        
+        frame = crop_and_pad_center(frame)
         
         frame_a = process_native_pipeline(app_a, frame.copy(), emb_a, names_a)
         cv2.putText(frame_a, f"Model A: {base_model_name}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
@@ -582,6 +616,8 @@ def evaluate_video_accuracy(models_list, video_path):
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret: break
+            
+            frame = crop_and_pad_center(frame)
             
             # 使用 Native 模式 (全幀偵測)
             # 必須包含縮放與畫布邏輯以符合 TensorRT 引擎
@@ -672,6 +708,8 @@ def benchmark_multi_model(models_list, video_path, mode='native'):
                     time.sleep(0.001)
                     continue
                 
+                frame = crop_and_pad_center(frame)
+                
                 # 測試時關閉繪圖 (draw=False) 以取得純運算 FPS
                 if mode == 'yolo':
                     process_yolo_pipeline(app, yolo_model, frame, known_embeddings, known_names, draw=False)
@@ -720,6 +758,8 @@ def benchmark_performance(app, yolo_model, target_path, known_embeddings, known_
                     if not cap.running: break
                     time.sleep(0.001)
                     continue
+                
+                frame = crop_and_pad_center(frame)
                 
                 if mode_name == "YOLO+Crop":
                     process_func(app, yolo_model, frame, known_embeddings, known_names, draw=False)
