@@ -206,11 +206,14 @@ def load_known_faces(app):
 # ==========================================
 # 輔助函式
 # ==========================================
-def smart_clahe(img):
+def smart_clahe(img, pipeline='native'):
     """
     智慧判斷是否需要進行 CLAHE 處理。
     只在「整體太暗」或「對比度極端 (陰陽臉)」時才觸發。
+    pipeline: 'yolo' 或 'native'，用於分別計數與儲存對比圖。
     """
+    global clahe_count_yolo, clahe_count_native
+
     # 1. 轉成單通道灰階來計算亮度
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     
@@ -221,10 +224,30 @@ def smart_clahe(img):
     std_brightness = np.std(gray)
     
     # 💡 判斷邏輯 (門檻數值可依你的戶外實際情況微調)
-    # 如果平均亮度小於 80 (太暗)，或者標準差大於 75 (光影極端不均)
-    if mean_brightness < 80 or std_brightness > 75:
-        # 進行急救
-        return apply_clahe(img)
+    # 如果平均亮度小於 50 (太暗)，或者標準差大於 85 (光影極端不均)
+    if mean_brightness < 50 or std_brightness > 85:
+        enhanced = apply_clahe(img)
+
+        # 更新對應 Pipeline 的計數器
+        if pipeline == 'yolo':
+            clahe_count_yolo += 1
+            count = clahe_count_yolo
+        else:
+            clahe_count_native += 1
+            count = clahe_count_native
+
+        # 儲存對比圖 (限制最多 CLAHE_SAVE_MAX 張，避免磁碟爆滿)
+        if count <= CLAHE_SAVE_MAX:
+            save_dir = 'result/clahe'
+            os.makedirs(save_dir, exist_ok=True)
+            comparison = np.hstack((img, enhanced))
+            save_path = os.path.join(
+                save_dir,
+                f"{pipeline}_{count:04d}_mean{mean_brightness:.0f}_std{std_brightness:.0f}.jpg"
+            )
+            cv2.imwrite(save_path, comparison)
+
+        return enhanced
     else:
         # 光線正常，直接放行原圖，保護 ArcFace 特徵
         return img
@@ -308,6 +331,9 @@ def get_center_distance(box1, box2):
 # 記憶體結構：列表存放 {'center': (x, y), 'name': str, 'score': float, 'color': tuple, 'miss_count': int, 'box': list}
 tracked_identities = [] 
 frame_counter = 0
+clahe_count_yolo = 0
+clahe_count_native = 0
+CLAHE_SAVE_MAX = 50  # 每個 Pipeline 最多儲存幾張對比圖
 
 def process_yolo_pipeline(app, yolo_model, img, known_embeddings, known_names, draw=True):
     global frame_counter, tracked_identities
@@ -422,7 +448,7 @@ def process_yolo_pipeline(app, yolo_model, img, known_embeddings, known_names, d
                         
                         if rec_model is not None:
                             aimg = face_align.norm_crop(canvas, landmark=face.kps, image_size=rec_model.input_size[0])
-                            aimg_clahe = smart_clahe(aimg)
+                            aimg_clahe = smart_clahe(aimg, pipeline='yolo')
                             face.embedding = rec_model.get_feat(aimg_clahe).flatten()
                         
                         faces.append(face)
@@ -458,6 +484,7 @@ def process_yolo_pipeline(app, yolo_model, img, known_embeddings, known_names, d
     if draw:
         status = "Recog" if DO_RECOGNITION else "Track"
         cv2.putText(img, f"YOLO+Crop: {fps:.1f} FPS ({status})", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+        cv2.putText(img, f"CLAHE(YOLO): {clahe_count_yolo}", (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 200, 0), 2)
     
     return img
 
@@ -501,7 +528,7 @@ def process_native_pipeline(app, img, known_embeddings, known_names, draw=True):
                 # 對齊切出人臉
                 aimg = face_align.norm_crop(canvas, landmark=face.kps, image_size=rec_model.input_size[0])
                 # 只對人臉這塊做 CLAHE 來節省資源
-                aimg_clahe = smart_clahe(aimg)
+                aimg_clahe = smart_clahe(aimg, pipeline='native')
                 # 送入 ArcFace 取特徵
                 face.embedding = rec_model.get_feat(aimg_clahe).flatten()
             
@@ -532,6 +559,7 @@ def process_native_pipeline(app, img, known_embeddings, known_names, draw=True):
     
     if draw:
         cv2.putText(img, f"Native Full: {fps:.1f} FPS", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+        cv2.putText(img, f"CLAHE(Native): {clahe_count_native}", (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 200, 0), 2)
     
     return img
 
