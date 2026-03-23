@@ -82,7 +82,7 @@ class VideoCaptureThreading:
 # 設定區域
 # ==========================================
 KNOWN_FACES_DIR = 'captured_faces'
-TARGET_IMAGE_PATH = 'muti1.mp4'  # 可更改為影片或圖片路徑
+TARGET_IMAGE_PATH = 'outdoor2.mp4'  # 可更改為影片或圖片路徑
 MODEL_NAME = 'buffalo_m'  # InsightFace 模型名稱
 THRESHOLD = 0.35                     
 
@@ -448,8 +448,7 @@ def process_yolo_pipeline(app, yolo_model, img, known_embeddings, known_names, d
                         
                         if rec_model is not None:
                             aimg = face_align.norm_crop(canvas, landmark=face.kps, image_size=rec_model.input_size[0])
-                            aimg_clahe = smart_clahe(aimg, pipeline='yolo')
-                            face.embedding = rec_model.get_feat(aimg_clahe).flatten()
+                            face.embedding = rec_model.get_feat(aimg).flatten()
                         
                         faces.append(face)
                 
@@ -484,7 +483,6 @@ def process_yolo_pipeline(app, yolo_model, img, known_embeddings, known_names, d
     if draw:
         status = "Recog" if DO_RECOGNITION else "Track"
         cv2.putText(img, f"YOLO+Crop: {fps:.1f} FPS ({status})", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-        cv2.putText(img, f"CLAHE(YOLO): {clahe_count_yolo}", (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 200, 0), 2)
     
     return img
 
@@ -527,10 +525,8 @@ def process_native_pipeline(app, img, known_embeddings, known_names, draw=True):
             if rec_model is not None:
                 # 對齊切出人臉
                 aimg = face_align.norm_crop(canvas, landmark=face.kps, image_size=rec_model.input_size[0])
-                # 只對人臉這塊做 CLAHE 來節省資源
-                aimg_clahe = smart_clahe(aimg, pipeline='native')
                 # 送入 ArcFace 取特徵
-                face.embedding = rec_model.get_feat(aimg_clahe).flatten()
+                face.embedding = rec_model.get_feat(aimg).flatten()
             
             faces.append(face)
     
@@ -559,7 +555,6 @@ def process_native_pipeline(app, img, known_embeddings, known_names, draw=True):
     
     if draw:
         cv2.putText(img, f"Native Full: {fps:.1f} FPS", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-        cv2.putText(img, f"CLAHE(Native): {clahe_count_native}", (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 200, 0), 2)
     
     return img
 
@@ -593,7 +588,10 @@ def compare_faces(app, yolo_model, target_path, known_embeddings, known_names, k
         out = cv2.VideoWriter(output_filename, fourcc, fps, (out_w, target_h))
         
         print(f"🎥 開始測試 ({target_w}x{target_h} @ {fps:.1f}fps)...")
-        
+
+        total_start = time.time()
+        frame_count = 0
+
         while True:
             frame_start = time.time()
             ret, frame = cap.read()
@@ -619,6 +617,7 @@ def compare_faces(app, yolo_model, target_path, known_embeddings, known_names, k
                 combined = frame_native
                 
             out.write(combined)
+            frame_count += 1
             
             h_disp, w_disp = combined.shape[:2]
             display_scale = 0.5 if w_disp > 1000 else 1.0
@@ -643,7 +642,10 @@ def compare_faces(app, yolo_model, target_path, known_embeddings, known_names, k
         try:
             cv2.destroyAllWindows()
         except: pass
-        print(f"\n💾 完成，結果儲存至: {output_filename}")
+        total_time = time.time() - total_start
+        avg_fps = frame_count / total_time if total_time > 0 else 0
+        print(f"\n📊 平均處理速度: {avg_fps:.2f} FPS (共 {frame_count} 幀，耗時 {total_time:.1f} 秒)")
+        print(f"💾 完成，結果儲存至: {output_filename}")
 
     else:
         # 圖片模式
@@ -802,8 +804,7 @@ def evaluate_video_accuracy(models_list, video_path):
                     
                     if rec_model is not None:
                         aimg = face_align.norm_crop(canvas, landmark=face.kps, image_size=rec_model.input_size[0])
-                        aimg_clahe = smart_clahe(aimg)
-                        face.embedding = rec_model.get_feat(aimg_clahe).flatten()
+                        face.embedding = rec_model.get_feat(aimg).flatten()
                     
                     faces.append(face)
             
@@ -846,6 +847,116 @@ def evaluate_video_accuracy(models_list, video_path):
         print(f"  - 辨識分佈 (TOP 5):")
         for name, count in sorted_ids[:5]:
             print(f"    * {name}: {count} 次")
+
+# ==========================================
+# 功能9：CLAHE 效果比對 (buffalo_m + Native Mode)
+# ==========================================
+def evaluate_clahe_impact(video_path, model_name='buffalo_m'):
+    """
+    比較 CLAHE 套用前後的辨識效果。
+    以 buffalo_m + Native 模式為基底，像功能3一樣統計各身份的辨識次數。
+    - No CLAHE: 對齊後的人臉直接送入 ArcFace，不做任何強化
+    - With CLAHE: 對齊後的人臉套用 smart_clahe (條件式 CLAHE)，再送入 ArcFace
+    """
+    print(f"\n🔬 開始 CLAHE 效果比對 (模型: {model_name}, Mode: Native)")
+    if not os.path.exists(video_path):
+        print(f"❌ 找不到影片檔案: {video_path}")
+        return
+
+    print(f"🔹 載入模型: {model_name}")
+    app, _ = init_insightface(model_name, load_yolo=False)
+    known_embeddings, known_names, _ = load_known_faces(app)
+
+    from insightface.app.common import Face
+    from insightface.utils import face_align
+
+    all_stats = {}
+
+    for use_clahe in [False, True]:
+        label = "With CLAHE" if use_clahe else "No CLAHE"
+        print(f"\n⚙️ 正在測試: [{label}]")
+
+        cap = cv2.VideoCapture(video_path)
+        stats = {"total_faces": 0, "identities": {}, "frame_count": 0, "fps": 0.0}
+        start_time = time.time()
+
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            frame = crop_and_pad_center(frame)
+
+            h_org, w_org = frame.shape[:2]
+            target_size = (1280, 1280)
+            canvas = np.zeros((target_size[1], target_size[0], 3), dtype=np.uint8)
+
+            scale = min(target_size[0] / w_org, target_size[1] / h_org)
+            nw, nh = int(w_org * scale), int(h_org * scale)
+            img_resized = cv2.resize(frame, (nw, nh))
+            canvas[:nh, :nw, :] = img_resized
+
+            bboxes, kpss = app.det_model.detect(canvas, max_num=0)
+            faces = []
+            if bboxes is not None:
+                rec_model = app.models.get('recognition')
+                for i in range(bboxes.shape[0]):
+                    bbox = bboxes[i, 0:4]
+                    det_score = bboxes[i, 4]
+                    kps = kpss[i] if kpss is not None else None
+                    face = Face(bbox=bbox, kps=kps, det_score=det_score)
+
+                    if rec_model is not None:
+                        aimg = face_align.norm_crop(canvas, landmark=face.kps, image_size=rec_model.input_size[0])
+                        if use_clahe:
+                            aimg = smart_clahe(aimg, pipeline='native')
+                        face.embedding = rec_model.get_feat(aimg).flatten()
+
+                    faces.append(face)
+
+            stats["total_faces"] += len(faces)
+            stats["frame_count"] += 1
+
+            for face in faces:
+                name, score = match_face(face.embedding, known_embeddings, known_names)
+                stats["identities"][name] = stats["identities"].get(name, 0) + 1
+
+            if stats["frame_count"] % 50 == 0:
+                elapsed = time.time() - start_time
+                curr_fps = stats["frame_count"] / elapsed if elapsed > 0 else 0
+                print(f"  已處理 {stats['frame_count']} 幀... (FPS: {curr_fps:.1f})", end="\r")
+
+        total_time = time.time() - start_time
+        stats["fps"] = stats["frame_count"] / total_time if total_time > 0 else 0
+        cap.release()
+        all_stats[label] = stats
+        print(f"\n✅ [{label}] 測試完成。平均 FPS: {stats['fps']:.2f}")
+
+    if not all_stats:
+        return
+
+    first_key = list(all_stats.keys())[0]
+    total_frames = all_stats[first_key]["frame_count"]
+    print(f"\n📈 CLAHE 效果比對統計 (總幀數: {total_frames}, 模型: {model_name}):")
+    for label, s in all_stats.items():
+        print(f"\n🔹 [{label}]")
+        print(f"  - 效能表現: {s['fps']:.2f} FPS")
+        print(f"  - 總計偵測到人臉次數: {s['total_faces']}")
+        sorted_ids = sorted(s["identities"].items(), key=lambda x: x[1], reverse=True)
+        print(f"  - 辨識分佈 (TOP 5):")
+        for name, count in sorted_ids[:5]:
+            print(f"    * {name}: {count} 次")
+
+    print("\n📊 差異分析 (With CLAHE vs No CLAHE):")
+    no_clahe_ids = all_stats["No CLAHE"]["identities"]
+    clahe_ids = all_stats["With CLAHE"]["identities"]
+    all_names = sorted(set(no_clahe_ids.keys()) | set(clahe_ids.keys()))
+    for name in all_names:
+        before = no_clahe_ids.get(name, 0)
+        after = clahe_ids.get(name, 0)
+        diff = after - before
+        diff_str = f"+{diff}" if diff > 0 else str(diff)
+        print(f"  * {name}: No CLAHE={before} | With CLAHE={after} | 差異={diff_str}")
 
 # ==========================================
 # 多模型效能 PK 功能
@@ -978,13 +1089,14 @@ if __name__ == "__main__":
         print("1. [All Benchmark] 極速效能測試 (YOLO + Native)")
         print("2. [Visualize + Benchmark] 視覺化比對後進行效能測試 (Dual View)")
         print("3. [Accuracy Comparison] 多模型影片準確率比對 (Full Frame)")
-        print("4. [YOLO Visualize + Benchmark] YOLO+Crop 視覺化並測試效能")
-        print("5. [Native Visualize + Benchmark] Native Full Frame 視覺化並測試效能")
+        print("4. [YOLO Visualize] YOLO+Crop 視覺化並統計平均速度")
+        print("5. [Native Visualize] Native Full Frame 視覺化並統計平均速度")
         print("6. [Model VS Visual] 雙模型即時視覺化對決 (Native Mode)")
         print("7. [Multi-Model Benchmark] 多模型 YOLO+Crop 效能 PK")
         print("8. [Multi-Model Benchmark] 多模型 Native Full 效能 PK")
-        
-        choice = input("請輸入選項 (1-8): ").strip()
+        print("9. [CLAHE Impact] 比較 CLAHE 前後辨識次數 (buffalo_m + Native)")
+
+        choice = input("請輸入選項 (1-9): ").strip()
         
         models_pk_list = ['my_arcface_pack', 'buffalo_m', 'my_arcface_pack_40', 'r50MS1MV3']
 
@@ -999,10 +1111,8 @@ if __name__ == "__main__":
             evaluate_video_accuracy(models_to_test, TARGET_IMAGE_PATH)
         elif choice == '4':
             compare_faces(app, yolo_model, TARGET_IMAGE_PATH, known_embeddings, known_names, known_files, mode='yolo')
-            benchmark_performance(app, yolo_model, TARGET_IMAGE_PATH, known_embeddings, known_names, run_mode='yolo')
         elif choice == '5':
             compare_faces(app, yolo_model, TARGET_IMAGE_PATH, known_embeddings, known_names, known_files, mode='native')
-            benchmark_performance(app, yolo_model, TARGET_IMAGE_PATH, known_embeddings, known_names, run_mode='native')
         elif choice == '6':
             model_a = 'buffalo_m'  # 基準模型
             default_model = MODEL_NAME
@@ -1012,6 +1122,8 @@ if __name__ == "__main__":
             benchmark_multi_model(models_pk_list, TARGET_IMAGE_PATH, mode='yolo')
         elif choice == '8':
             benchmark_multi_model(models_pk_list, TARGET_IMAGE_PATH, mode='native')
+        elif choice == '9':
+            evaluate_clahe_impact(TARGET_IMAGE_PATH, model_name='buffalo_m')
         else:
             print("❌ 無效選項，結束程式")
     else:
