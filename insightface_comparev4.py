@@ -82,9 +82,10 @@ class VideoCaptureThreading:
 # 設定區域
 # ==========================================
 KNOWN_FACES_DIR = 'captured_faces'
-TARGET_IMAGE_PATH = 'outdoor2.mp4'  # 可更改為影片或圖片路徑
-MODEL_NAME = 'buffalo_m'  # InsightFace 模型名稱
-THRESHOLD = 0.35                     
+TARGET_IMAGE_PATH = 'Timeline 2.mp4'  
+MODEL_NAME = 'buffalo_m'  
+THRESHOLD = 0.35
+CANVAS_SIZE = 1440 # 🌟 新增這個變數，可隨意修改
 
 # ==========================================
 # 初始化
@@ -110,7 +111,7 @@ def init_insightface(model_name=MODEL_NAME, load_yolo=True):
     app = FaceAnalysis(name=model_name, providers=providers)
     
     # 這裡的 det_size 決定了偵測器的解析度
-    app.prepare(ctx_id=0, det_size=(1280, 1280)) 
+    app.prepare(ctx_id=0, det_size=(CANVAS_SIZE, CANVAS_SIZE)) 
     
     yolo_model = None
     if load_yolo:
@@ -148,8 +149,8 @@ def load_known_faces(app):
             if img is None: continue
             
             # 💡 核心修正：配合 TRT 引擎尺寸，並防止人臉被過度放大
-            # 1. 建立一個 1280x1280 的黑底畫布 (符合 app.prepare 設定)
-            canvas = np.zeros((1280, 1280, 3), dtype=np.uint8)
+            # 1. 建立一個符合畫布大小的黑底畫布 (符合 app.prepare 設定)
+            canvas = np.zeros((CANVAS_SIZE, CANVAS_SIZE, 3), dtype=np.uint8)
             
             # 2. 將註冊照片縮放，但限制最大不能超過 640 
             # (避免臉太大超出 RetinaFace 的 Anchor Box 極限)
@@ -274,13 +275,14 @@ def apply_clahe(img):
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         return clahe.apply(img)
 
-def crop_and_pad_center(img, target_w=1280, target_h=1280):
+def crop_and_pad_center(img, target_w=CANVAS_SIZE, target_h=CANVAS_SIZE):
     """
-    將影像裁切並填充至目標大小 (預設 1280x1280)。
-    若尺寸大於目標則取中間裁切；若小於目標則用白邊補齊。
+    將影像裁切並填充至目標大小。
+    X軸(寬度)保持置中，Y軸(高度)向下對齊(中間下方)。
     """
     h, w = img.shape[:2]
     
+    # 寬度保持置中邏輯 (不變)
     if w > target_w:
         start_x = (w - target_w) // 2
         img = img[:, start_x:start_x+target_w]
@@ -290,14 +292,16 @@ def crop_and_pad_center(img, target_w=1280, target_h=1280):
         pad_right = pad_w - pad_left
         img = cv2.copyMakeBorder(img, 0, 0, pad_left, pad_right, cv2.BORDER_CONSTANT, value=(255, 255, 255))
         
+    # 高度改為向下對齊
     h = img.shape[0]
     if h > target_h:
-        start_y = (h - target_h) // 2
-        img = img[start_y:start_y+target_h, :]
+        # 太高時，擷取最底部的部分
+        start_y = h - target_h
+        img = img[start_y:h, :]
     elif h < target_h:
-        pad_h = target_h - h
-        pad_top = pad_h // 2
-        pad_bottom = pad_h - pad_top
+        # 太矮時，把填充白邊全部加在上方 (頂部)
+        pad_top = target_h - h
+        pad_bottom = 0
         img = cv2.copyMakeBorder(img, pad_top, pad_bottom, 0, 0, cv2.BORDER_CONSTANT, value=(255, 255, 255))
         
     return img
@@ -330,6 +334,7 @@ def get_center_distance(box1, box2):
 # ==========================================
 # 記憶體結構：列表存放 {'center': (x, y), 'name': str, 'score': float, 'color': tuple, 'miss_count': int, 'box': list}
 tracked_identities = [] 
+tracked_identities_native = []  # 🌟 Native pipeline 追蹤記憶體
 frame_counter = 0
 clahe_count_yolo = 0
 clahe_count_native = 0
@@ -401,7 +406,9 @@ def process_yolo_pipeline(app, yolo_model, img, known_embeddings, known_names, d
                 'score': 0.0,
                 'color': (128, 128, 128),
                 'matched_this_frame': True,
-                'miss_count': 0
+                'miss_count': 0,
+                'history_names': [], # 🌟 新增歷史辨識紀錄
+                'history_scores': []
             }
             tracked_identities.append(new_id)
             matched_identity = new_id
@@ -411,7 +418,7 @@ def process_yolo_pipeline(app, yolo_model, img, known_embeddings, known_names, d
             person_crop = img[y1_real:y2_real, x1_real:x2_real]
             if person_crop.size > 0:
                 # 修正：強制使用 1280x1280 畫布以符合 TensorRT 引擎要求
-                target_size = (1280, 1280)
+                target_size = (CANVAS_SIZE, CANVAS_SIZE)
                 canvas = np.zeros((target_size[1], target_size[0], 3), dtype=np.uint8)
                 
                 h_crop, w_crop = person_crop.shape[:2]
@@ -447,7 +454,9 @@ def process_yolo_pipeline(app, yolo_model, img, known_embeddings, known_names, d
                         face = Face(bbox=bbox, kps=kps, det_score=det_score)
                         
                         if rec_model is not None:
+                            # 對齊切出人臉
                             aimg = face_align.norm_crop(canvas, landmark=face.kps, image_size=rec_model.input_size[0])
+                            # 送入 ArcFace 取特徵
                             face.embedding = rec_model.get_feat(aimg).flatten()
                         
                         faces.append(face)
@@ -456,9 +465,30 @@ def process_yolo_pipeline(app, yolo_model, img, known_embeddings, known_names, d
                     face = sorted(faces, key=lambda x: (x.bbox[2]-x.bbox[0])*(x.bbox[3]-x.bbox[1]), reverse=True)[0]
                     
                     final_name, final_score = match_face(face.embedding, known_embeddings, known_names)
-                    matched_identity['name'] = final_name
-                    matched_identity['score'] = final_score
-                    matched_identity['color'] = (0, 255, 0) if final_name != "Unknown" else (0, 0, 255)
+                    
+                    # 🌟 歷史投票機制
+                    matched_identity['history_names'].append(final_name)
+                    matched_identity['history_scores'].append(final_score)
+                    
+                    # 只保留最近 5 幀的辨識紀錄
+                    if len(matched_identity['history_names']) > 5:
+                        matched_identity['history_names'].pop(0)
+                        matched_identity['history_scores'].pop(0)
+                    
+                    # 統計出現最多次的名字 (去除 Unknown，除非全部都是 Unknown)
+                    valid_names = [n for n in matched_identity['history_names'] if n != "Unknown"]
+                    if valid_names:
+                        # 找出出現最多次的有效名字
+                        best_name = max(set(valid_names), key=valid_names.count)
+                        # 從歷史分數中找出這個名字對應的最高分
+                        best_score = max([s for n, s in zip(matched_identity['history_names'], matched_identity['history_scores']) if n == best_name])
+                    else:
+                        best_name = "Unknown"
+                        best_score = final_score
+
+                    matched_identity['name'] = best_name
+                    matched_identity['score'] = best_score
+                    matched_identity['color'] = (0, 255, 0) if best_name != "Unknown" else (0, 0, 255)
 
     # 3. 慣性 (Inertia): 處理未匹配對象並繪製所有活躍對象
     new_tracked_identities = []
@@ -486,29 +516,40 @@ def process_yolo_pipeline(app, yolo_model, img, known_embeddings, known_names, d
     
     return img
 
+def _update_voted_name(identity, fallback_score):
+    """歷史投票：從最近 N 幀紀錄中選出最可信的名字，更新到 identity。"""
+    valid_names = [n for n in identity['history_names'] if n != "Unknown"]
+    if valid_names:
+        best_name = max(set(valid_names), key=valid_names.count)
+        best_score = max(
+            s for n, s in zip(identity['history_names'], identity['history_scores'])
+            if n == best_name
+        )
+    else:
+        best_name = "Unknown"
+        best_score = fallback_score
+    identity['name'] = best_name
+    identity['score'] = best_score
+    identity['color'] = (0, 255, 0) if best_name != "Unknown" else (0, 0, 255)
+
 # ==========================================
-# Pipeline 2: Native InsightFace (修復偵測失敗問題)
+# Pipeline 2: Native InsightFace (含追蹤平滑，消除閃爍)
 # ==========================================
 def process_native_pipeline(app, img, known_embeddings, known_names, draw=True):
-    # Native 模式不跳幀，為了顯示真實的慘烈速度
-    # 也不縮放，為了顯示真實的偵測能力
-    
+    global tracked_identities_native
+
     t0 = time.time()
     h_org, w_org = img.shape[:2]
     
-    # [修正] TensorRT 必須使用固定的 1280x1280 輸入
-    # 我們將影像縮放並貼到 1280x1280 的畫布上
-    target_size = (1280, 1280)
+    # [修正] TensorRT 必須使用固定的輸入大小
+    target_size = (CANVAS_SIZE, CANVAS_SIZE)
     canvas = np.zeros((target_size[1], target_size[0], 3), dtype=np.uint8)
     
     scale = min(target_size[0] / w_org, target_size[1] / h_org)
     nw, nh = int(w_org * scale), int(h_org * scale)
     img_resized = cv2.resize(img, (nw, nh))
-    
     canvas[:nh, :nw, :] = img_resized
     
-    # 此時不需要再設定 app.det_model.input_size，因為它已經是固定的
-    # 原本是 faces = app.get(canvas)，現改為先偵測、對齊，再做 CLAHE，最後才做辨識
     from insightface.app.common import Face
     from insightface.utils import face_align
     
@@ -523,38 +564,122 @@ def process_native_pipeline(app, img, known_embeddings, known_names, draw=True):
             face = Face(bbox=bbox, kps=kps, det_score=det_score)
             
             if rec_model is not None:
-                # 對齊切出人臉
                 aimg = face_align.norm_crop(canvas, landmark=face.kps, image_size=rec_model.input_size[0])
-                # 送入 ArcFace 取特徵
                 face.embedding = rec_model.get_feat(aimg).flatten()
             
             faces.append(face)
-    
-    if len(faces) > 0:
-        face = faces[0]
-        # 注意：這裡的 kps (關鍵點) 是在 canvas 座標系上的，如果要裁切原圖需要映射回去
-        # 為了簡單除錯，這裡暫時略過寫入 debug 圖片的步驟，或將其註解掉
-        # from insightface.utils import face_align
-        # norm_crop = face_align.norm_crop(img, face.kps)
-        # cv2.imwrite("debug_warped_face_native.jpg", norm_crop)
 
+    # ---- 🌟 追蹤 + 歷史投票機制 ----
+    # 用 embedding cosine similarity 配對追蹤物件，避免多臉靠近時空間距離配錯人。
+    # 配對完成後，用 IoU 去重，消除「同一張臉有兩個框」的殘影問題。
+
+    EMBED_MATCH_THRESHOLD = 0.35  # cosine sim 低於此值視為不同人
+
+    for identity in tracked_identities_native:
+        identity['matched_this_frame'] = False
+
+    # 備妥本幀所有臉的資料
+    face_data = []
     for face in faces:
         name, score = match_face(face.embedding, known_embeddings, known_names)
-        
-        # 將 bbox 映射回原圖座標
-        box = face.bbox.astype(float)
-        box = box / scale
-        box = box.astype(int)
-        
-        if draw:
-            color = (0, 255, 0) if name != "Unknown" else (0, 0, 255)
-            draw_recognition(img, box, name, score, color)
+        box_orig = (face.bbox.astype(float) / scale).astype(int)
+        emb_norm = face.embedding / (np.linalg.norm(face.embedding) + 1e-9)
+        face_data.append({
+            'name': name, 'score': score,
+            'box': box_orig.tolist(),
+            'embedding': emb_norm,
+            'assigned': False
+        })
+
+    # --- Greedy embedding 配對 ---
+    for identity in tracked_identities_native:
+        if identity.get('last_embedding') is None:
+            continue
+        best_sim = EMBED_MATCH_THRESHOLD
+        best_fd = None
+        for fd in face_data:
+            if fd['assigned']:
+                continue
+            sim = float(np.dot(identity['last_embedding'], fd['embedding']))
+            if sim > best_sim:
+                best_sim = sim
+                best_fd = fd
+        if best_fd is not None:
+            best_fd['assigned'] = True
+            identity.update({
+                'box': best_fd['box'],
+                'matched_this_frame': True,
+                'miss_count': 0,
+                'last_embedding': best_fd['embedding']
+            })
+            identity['history_names'].append(best_fd['name'])
+            identity['history_scores'].append(best_fd['score'])
+            if len(identity['history_names']) > 7:
+                identity['history_names'].pop(0)
+                identity['history_scores'].pop(0)
+            _update_voted_name(identity, best_fd['score'])
+
+    # --- 未被配對到的臉 → 建立新追蹤物件 ---
+    for fd in face_data:
+        if fd['assigned']:
+            continue
+        new_id = {
+            'box': fd['box'],
+            'name': fd['name'],
+            'score': fd['score'],
+            'color': (0, 255, 0) if fd['name'] != "Unknown" else (0, 0, 255),
+            'matched_this_frame': True,
+            'miss_count': 0,
+            'last_embedding': fd['embedding'],
+            'history_names': [fd['name']],
+            'history_scores': [fd['score']]
+        }
+        tracked_identities_native.append(new_id)
+
+    # --- IoU 去重：消除指向同一張臉的重複追蹤物件（殘影來源）---
+    # 對所有「本幀有匹配」的物件，若兩兩之間 IoU > 0.4，保留歷史較長的那個
+    def _box_iou(b1, b2):
+        ix1, iy1 = max(b1[0], b2[0]), max(b1[1], b2[1])
+        ix2, iy2 = min(b1[2], b2[2]), min(b1[3], b2[3])
+        inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+        if inter == 0:
+            return 0.0
+        a1 = (b1[2]-b1[0]) * (b1[3]-b1[1])
+        a2 = (b2[2]-b2[0]) * (b2[3]-b2[1])
+        return inter / (a1 + a2 - inter)
+
+    active = [t for t in tracked_identities_native if t['matched_this_frame']]
+    suppress = set()
+    for i in range(len(active)):
+        for j in range(i + 1, len(active)):
+            if _box_iou(active[i]['box'], active[j]['box']) > 0.4:
+                # 保留歷史較長（history 較多）的物件，刪除較新的
+                newer = i if len(active[i]['history_names']) < len(active[j]['history_names']) else j
+                suppress.add(id(active[newer]))
+
+    # 慣性處理：未被偵測到的對象存活最多 3 幀（只保留 identity，不畫框）
+    # 🔑 關鍵：只有本幀有偵測到臉（matched_this_frame=True）才畫框，
+    #         慣性幀只是讓下一幀能繼續配對，不顯示在畫面上，徹底消除殘影。
+    new_tracked = []
+    for identity in tracked_identities_native:
+        if id(identity) in suppress:
+            continue  # IoU 去重：丟棄重複物件
+        if not identity['matched_this_frame']:
+            identity['miss_count'] += 1
+        if identity['miss_count'] < 3:
+            new_tracked.append(identity)
+            if draw and identity['matched_this_frame']:  # ← 只畫當幀有偵測到的
+                draw_recognition(img, identity['box'], identity['name'],
+                                 identity['score'], identity['color'])
+    tracked_identities_native = new_tracked
+    # ---- 追蹤平滑結束 ----
 
     t1 = time.time()
     fps = 1.0 / (t1 - t0) if (t1 - t0) > 0 else 0
     
     if draw:
-        cv2.putText(img, f"Native Full: {fps:.1f} FPS", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+        cv2.putText(img, f"Native Full: {fps:.1f} FPS", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
     
     return img
 
@@ -581,7 +706,7 @@ def compare_faces(app, yolo_model, target_path, known_embeddings, known_names, k
         frame_delay = int(1000 / fps)
         
         # 影像將被裁切與填充為 1280x1280
-        target_w, target_h = 1280, 1280
+        target_w, target_h = CANVAS_SIZE, CANVAS_SIZE
         out_w = target_w * 2 if mode == 'all' else target_w
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         output_filename = os.path.join(output_dir, f"result_{mode}_{os.path.basename(target_path)}")
@@ -707,7 +832,7 @@ def visual_compare_models(base_model_name, new_model_name, target_path):
     frame_delay = int(1000 / fps)
 
     #設定輸出影片
-    target_w, target_h = 1280, 1280
+    target_w, target_h = CANVAS_SIZE, CANVAS_SIZE
     output_filename = os.path.join(output_dir, f"compare_{base_model_name}_vs_{new_model_name}_{os.path.basename(target_path)}")
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(output_filename, fourcc, fps, (target_w * 2, target_h))
@@ -780,7 +905,7 @@ def evaluate_video_accuracy(models_list, video_path):
             # 使用 Native 模式 (全幀偵測)
             # 必須包含縮放與畫布邏輯以符合 TensorRT 引擎
             h_org, w_org = frame.shape[:2]
-            target_size = (1280, 1280)
+            target_size = (CANVAS_SIZE, CANVAS_SIZE)
             canvas = np.zeros((target_size[1], target_size[0], 3), dtype=np.uint8)
             
             scale = min(target_size[0] / w_org, target_size[1] / h_org)
@@ -888,7 +1013,7 @@ def evaluate_clahe_impact(video_path, model_name='buffalo_m'):
             frame = crop_and_pad_center(frame)
 
             h_org, w_org = frame.shape[:2]
-            target_size = (1280, 1280)
+            target_size = (CANVAS_SIZE, CANVAS_SIZE)
             canvas = np.zeros((target_size[1], target_size[0], 3), dtype=np.uint8)
 
             scale = min(target_size[0] / w_org, target_size[1] / h_org)
@@ -968,14 +1093,14 @@ def benchmark_multi_model(models_list, video_path, mode='native'):
     results = {}
     
     # 確保 Reset 追蹤變數
-    global frame_counter, tracked_identities
+    global frame_counter, tracked_identities_native
 
     for model_name in models_list:
         print(f"\n⚙️ 正在測試模型: {model_name}")
         
         # Reset variables for each model
         frame_counter = 0
-        tracked_identities = []
+        tracked_identities_native = []
         
         # 初始化該模型
         # 若是 native 模式，不需要 YOLO
@@ -1026,12 +1151,13 @@ def benchmark_multi_model(models_list, video_path, mode='native'):
 # 核心優化：極速測試模式
 # ==========================================
 def benchmark_performance(app, yolo_model, target_path, known_embeddings, known_names, run_mode='all'):
-    global frame_counter, tracked_identities
+    global frame_counter, tracked_identities, tracked_identities_native
     
     def run_pass(mode_name, process_func):
-        global frame_counter, tracked_identities
+        global frame_counter, tracked_identities, tracked_identities_native
         frame_counter = 0
         tracked_identities = []
+        tracked_identities_native = []
         
         print(f"\n🔥 開始 {mode_name} 效能測試: {target_path}")
         cap = VideoCaptureThreading(target_path)
@@ -1098,7 +1224,7 @@ if __name__ == "__main__":
 
         choice = input("請輸入選項 (1-9): ").strip()
         
-        models_pk_list = ['my_arcface_pack', 'buffalo_m', 'my_arcface_pack_40', 'r50MS1MV3']
+        models_pk_list = ['my_arcface_pack', 'buffalo_m', 'my_arcface_pack_40', 'r50MS1MV3', 'my_arcface_pack_20e', 'qa40_gdc']
 
         if choice == '1':
             benchmark_performance(app, yolo_model, TARGET_IMAGE_PATH, known_embeddings, known_names, run_mode='all')
@@ -1114,7 +1240,7 @@ if __name__ == "__main__":
         elif choice == '5':
             compare_faces(app, yolo_model, TARGET_IMAGE_PATH, known_embeddings, known_names, known_files, mode='native')
         elif choice == '6':
-            model_a = 'buffalo_m'  # 基準模型
+            model_a = 'qa40_gdc'  # 基準模型
             default_model = MODEL_NAME
             model_b = input(f"請輸入要比較的模型名稱 (預設: {default_model}): ").strip() or default_model
             visual_compare_models(model_a, model_b, TARGET_IMAGE_PATH)
